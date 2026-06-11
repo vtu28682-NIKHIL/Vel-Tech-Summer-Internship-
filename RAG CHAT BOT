@@ -1,0 +1,259 @@
+import streamlit as st
+import os
+import tempfile
+
+from dotenv import load_dotenv
+
+from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
+
+from langchain_community.vectorstores import FAISS
+from langchain_community.document_loaders import PyPDFLoader
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# ----------------------------
+# CONFIG
+# ----------------------------
+
+load_dotenv()
+
+api_key = os.getenv("GROQ_API_KEY")
+
+st.set_page_config(
+    page_title="RAG Chatbot",
+    page_icon="🤖",
+    layout="wide"
+)
+
+st.title("RAG Chatbot")
+
+if not api_key:
+    st.error("GROQ_API_KEY not found in .env file")
+    st.stop()
+
+# ----------------------------
+# EMBEDDING MODEL
+# ----------------------------
+
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+# ----------------------------
+# SESSION STATE
+# ----------------------------
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "vectorstore" not in st.session_state:
+    st.session_state.vectorstore = None
+
+# ----------------------------
+# LOAD EXISTING FAISS
+# ----------------------------
+
+if (
+    st.session_state.vectorstore is None
+    and os.path.exists("faiss_index")
+):
+
+    try:
+        st.session_state.vectorstore = FAISS.load_local(
+            "faiss_index",
+            embeddings,
+            allow_dangerous_deserialization=True
+        )
+
+        st.sidebar.success("Loaded saved vector database")
+
+    except Exception:
+        pass
+
+# ----------------------------
+# SIDEBAR
+# ----------------------------
+
+with st.sidebar:
+
+    st.header("📄 Upload PDFs")
+
+    uploaded_files = st.file_uploader(
+        "Choose PDF files",
+        type="pdf",
+        accept_multiple_files=True
+    )
+
+    if st.button("Process PDFs"):
+
+        if not uploaded_files:
+            st.warning("Please upload at least one PDF")
+            st.stop()
+
+        documents = []
+
+        progress = st.progress(0)
+
+        with st.spinner("Reading PDFs..."):
+
+            for i, uploaded_file in enumerate(uploaded_files):
+
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=".pdf"
+                ) as tmp_file:
+
+                    tmp_file.write(uploaded_file.read())
+                    pdf_path = tmp_file.name
+
+                loader = PyPDFLoader(pdf_path)
+
+                docs = loader.load()
+
+                documents.extend(docs)
+
+                progress.progress(
+                    (i + 1) / len(uploaded_files)
+                )
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=2000,
+            chunk_overlap=100
+        )
+
+        chunks = splitter.split_documents(documents)
+
+        with st.spinner("Creating vector database..."):
+
+            vectorstore = FAISS.from_documents(
+                chunks,
+                embeddings
+            )
+
+            vectorstore.save_local("faiss_index")
+
+        st.session_state.vectorstore = vectorstore
+
+        st.success(
+            f"Processed {len(uploaded_files)} PDF(s)"
+        )
+
+# ----------------------------
+# CHAT HISTORY
+# ----------------------------
+
+for msg in st.session_state.messages:
+
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# ----------------------------
+# USER INPUT
+# ----------------------------
+
+question = st.chat_input(
+    "Ask anything about your PDFs..."
+)
+
+if question:
+
+    st.session_state.messages.append(
+        {
+            "role": "user",
+            "content": question
+        }
+    )
+
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    with st.chat_message("assistant"):
+
+        if st.session_state.vectorstore is None:
+
+            answer = (
+                "Please upload and process PDFs first."
+            )
+
+        else:
+
+            retriever = (
+                st.session_state.vectorstore.as_retriever(
+                    search_type="mmr",
+                    search_kwargs={
+                        "k": 6,
+                        "fetch_k": 20
+                    }
+                )
+            )
+
+            docs = retriever.invoke(question)
+
+            context = ""
+
+            sources = []
+
+            for doc in docs:
+
+                page = doc.metadata.get(
+                    "page",
+                    "Unknown"
+                )
+
+                sources.append(
+                    f"Page {page + 1}"
+                    if isinstance(page, int)
+                    else f"Page {page}"
+                )
+
+                context += (
+                    f"\n[Page {page}]\n"
+                    f"{doc.page_content}\n\n"
+                )
+
+            llm = ChatGroq(
+                model="llama-3.3-70b-versatile",
+                temperature=0
+            )
+
+            prompt = f"""
+You are a PDF assistant.
+
+Answer ONLY using the context provided.
+
+If the answer is not available,
+reply:
+
+'I could not find that information in the uploaded PDFs.'
+
+Provide page references when possible.
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer:
+"""
+
+            response = llm.invoke(prompt)
+
+            answer = response.content
+
+            if sources:
+
+                answer += "\n\n**Sources:** "
+                answer += ", ".join(
+                    sorted(set(sources))
+                )
+
+        st.markdown(answer)
+
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": answer
+        }
+    )
