@@ -1,0 +1,103 @@
+# ==========================================
+# INSURANCE DATASET ANALYSIS
+# ==========================================
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load Dataset
+df = pd.read_csv("insurance.csv")
+
+# Basic Information
+print(df.head())
+print(df.shape)
+print(df.size)
+print(df.columns)
+print(df.dtypes)
+print(df.info())
+
+# Missing Values
+print(df.isnull().sum())
+
+# Statistical Summary
+print(df.describe())
+
+# Unique Values
+print(df["sex"].unique())
+print(df["smoker"].unique())
+print(df["region"].unique())
+
+# Group Analysis
+print(df.groupby("region")["charges"].mean())
+print(df.groupby("sex")["bmi"].mean())
+print(df.groupby("smoker")["charges"].mean())
+
+# Maximum and Minimum Values
+print("Maximum Charge:", df["charges"].max())
+print("Minimum Charge:", df["charges"].min())
+
+# Top 10 Highest Charges
+print(df.sort_values("charges", ascending=False).head(10))
+
+# Count Values
+print(df["smoker"].value_counts())
+print(df["sex"].value_counts())
+print(df["region"].value_counts())
+
+# Visualizations
+df["age"].hist()
+plt.title("Age Distribution")
+plt.show()
+
+df["charges"].hist()
+plt.title("Charges Distribution")
+plt.show()
+
+plt.scatter(df["age"], df["charges"])
+plt.xlabel("Age")
+plt.ylabel("Charges")
+plt.title("Age vs Charges")
+plt.show()
+
+# Machine Learning
+
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
+
+# Encoding
+le = LabelEncoder()
+df["sex"] = le.fit_transform(df["sex"])
+df["smoker"] = le.fit_transform(df["smoker"])
+df["region"] = le.fit_transform(df["region"])
+
+# Features and Target
+X = df.drop("charges", axis=1)
+y = df["charges"]
+
+# Split Data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# Train Model
+model = LinearRegression()
+model.fit(X_train, y_train)
+
+# Prediction
+y_pred = model.predict(X_test)
+
+# Accuracy
+print("R2 Score:", r2_score(y_test, y_pred))
+
+# New Customer Prediction
+new_customer = [[25, 1, 28.5, 1, 0, 2]]
+prediction = model.predict(new_customer)
+
+print("Predicted Insurance Charge:", prediction[0])
+
+# ==========================================
+# END OF PROJECT
+# ==========================================
