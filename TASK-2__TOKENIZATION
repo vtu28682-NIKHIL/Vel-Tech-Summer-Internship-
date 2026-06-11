@@ -1,0 +1,21 @@
+from transformers import GPT2Tokenizer
+
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+
+tokenizer.pad_token = tokenizer.eos_token
+
+text = "I am learning AI ML"
+
+tokens = tokenizer.tokenize(text)
+
+token_ids = tokenizer.convert_tokens_to_ids(tokens)
+
+encoded = tokenizer.encode(text)
+
+decoded = tokenizer.decode(encoded)
+
+print("Original:", text)
+print("Tokens:", tokens)
+print("Token IDs:", token_ids)
+print("Encoded Output:", encoded)
+print("Decoded Output:", decoded)
