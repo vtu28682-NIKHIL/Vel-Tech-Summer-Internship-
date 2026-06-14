@@ -1,0 +1,441 @@
+import streamlit as st
+import os
+import tempfile
+
+from dotenv import load_dotenv
+
+from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# ----------------------------
+# CONFIG
+# ----------------------------
+
+load_dotenv()
+api_key = os.getenv("GROQ_API_KEY")
+
+st.set_page_config(
+    page_title="ResumeIQ – AI Resume Analyzer",
+    layout="wide",
+    page_icon="📄"
+)
+
+st.markdown("""
+<style>
+
+/* ── Base ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+[data-testid="stAppViewContainer"] {
+    background-color: #0d1117;
+    color: #e6edf3;
+    font-family: 'Inter', sans-serif;
+}
+
+[data-testid="stSidebar"] {
+    background-color: #161b22;
+    border-right: 1px solid #21262d;
+}
+
+/* ── Title ── */
+h1 {
+    text-align: center;
+    font-size: 38px !important;
+    font-weight: 800;
+    background: linear-gradient(135deg, #58a6ff, #bc8cff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 4px !important;
+}
+
+.subtitle {
+    text-align: center;
+    color: #8b949e;
+    font-size: 14px;
+    margin-bottom: 24px;
+}
+
+/* ── Chat bubbles ── */
+.user-bubble {
+    background: linear-gradient(135deg, #1f3a5f, #1a2f4e);
+    border: 1px solid #2d5986;
+    padding: 14px 18px;
+    border-radius: 16px 16px 4px 16px;
+    margin: 10px 0 10px 15%;
+    color: #cdd9e5;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.bot-bubble {
+    background-color: #161b22;
+    border: 1px solid #21262d;
+    padding: 14px 18px;
+    border-radius: 16px 16px 16px 4px;
+    margin: 10px 15% 10px 0;
+    color: #e6edf3;
+    font-size: 14px;
+    line-height: 1.8;
+}
+
+/* ── Quick action chips ── */
+.chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 16px 0;
+}
+
+/* ── Sidebar labels ── */
+.sidebar-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #8b949e;
+    margin-bottom: 6px;
+}
+
+/* ── Metric cards ── */
+[data-testid="stMetricValue"] {
+    color: #58a6ff !important;
+    font-weight: 700 !important;
+}
+
+/* ── Input box ── */
+[data-testid="stChatInput"] {
+    border-radius: 12px;
+    background-color: #161b22 !important;
+}
+
+/* ── Progress ── */
+[data-testid="stProgress"] > div {
+    background: linear-gradient(90deg, #58a6ff, #bc8cff) !important;
+    border-radius: 4px;
+}
+
+/* ── Divider ── */
+hr {
+    border-color: #21262d !important;
+}
+
+/* ── Buttons ── */
+.stButton > button {
+    background-color: #21262d;
+    color: #e6edf3;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    font-size: 13px;
+    transition: all 0.15s ease;
+}
+
+.stButton > button:hover {
+    background-color: #2d333b;
+    border-color: #58a6ff;
+    color: #58a6ff;
+}
+
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+    max-width: 900px;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+# ----------------------------
+# HEADER
+# ----------------------------
+
+st.title("ResumeIQ")
+st.markdown('<p class="subtitle">Upload a resume and ask anything — skills, gaps, ATS score, improvements, and more.</p>', unsafe_allow_html=True)
+
+if not api_key:
+    st.error("⚠️  GROQ_API_KEY not found in .env file. Add it and restart.")
+    st.stop()
+
+# ----------------------------
+# EMBEDDING MODEL
+# ----------------------------
+
+@st.cache_resource
+def load_embeddings():
+    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+embeddings = load_embeddings()
+
+# ----------------------------
+# LLM
+# ----------------------------
+
+def get_llm():
+    return ChatGroq(
+        model="llama-3.3-70b-versatile",
+        temperature=0.2,
+        api_key=api_key
+    )
+
+# ----------------------------
+# SESSION STATE
+# ----------------------------
+
+for key, default in {
+    "clicked_query": None,
+    "messages": [],
+    "vectorstore": None,
+    "resume_name": None,
+    "last_question": None,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+# ----------------------------
+# LOAD SAVED FAISS INDEX
+# ----------------------------
+
+if st.session_state.vectorstore is None and os.path.exists("resume_faiss_index"):
+    try:
+        st.session_state.vectorstore = FAISS.load_local(
+            "resume_faiss_index",
+            embeddings,
+            allow_dangerous_deserialization=True
+        )
+        st.sidebar.success("✅ Loaded previously analyzed resume")
+    except Exception:
+        pass
+
+# ----------------------------
+# SIDEBAR
+# ----------------------------
+
+with st.sidebar:
+
+    st.markdown("""
+    <div style="text-align:center; padding:16px 0 8px 0;">
+        <div style="font-size:36px;">📄</div>
+        <div style="font-size:18px; font-weight:700; color:#e6edf3;">ResumeIQ</div>
+        <div style="font-size:12px; color:#8b949e;">AI-Powered Resume Analyzer</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── Upload section ──
+    st.markdown('<p class="sidebar-label">📂 Upload Resume</p>', unsafe_allow_html=True)
+
+    uploaded_files = st.file_uploader(
+        "Upload PDF resume(s)",
+        type="pdf",
+        accept_multiple_files=True,
+        label_visibility="collapsed"
+    )
+
+    pdf_count = len(uploaded_files) if uploaded_files else 0
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("📚 Resumes", pdf_count)
+
+    if uploaded_files:
+        st.markdown('<p class="sidebar-label" style="margin-top:8px;">Files</p>', unsafe_allow_html=True)
+        for pdf in uploaded_files:
+            st.write(f"📄 {pdf.name}")
+
+    # ── Analyze button ──
+    if st.button("⚡ Analyze Resume(s)", use_container_width=True):
+        if not uploaded_files:
+            st.warning("Please upload at least one PDF resume.")
+            st.stop()
+
+        documents = []
+        progress = st.progress(0)
+
+        with st.spinner("Reading resume(s)..."):
+            for i, uploaded_file in enumerate(uploaded_files):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(uploaded_file.read())
+                    pdf_path = tmp.name
+
+                loader = PyPDFLoader(pdf_path)
+                docs = loader.load()
+                # Tag each chunk with the filename
+                for doc in docs:
+                    doc.metadata["source_file"] = uploaded_file.name
+                documents.extend(docs)
+                progress.progress((i + 1) / len(uploaded_files))
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1500,
+            chunk_overlap=200
+        )
+        chunks = splitter.split_documents(documents)
+
+        with st.spinner("Building knowledge base..."):
+            vectorstore = FAISS.from_documents(chunks, embeddings)
+            vectorstore.save_local("resume_faiss_index")
+
+        st.session_state.vectorstore = vectorstore
+        st.session_state.resume_name = ", ".join(f.name for f in uploaded_files)
+        st.session_state.messages = []   # fresh chat for new resume
+        st.success(f"✅ Analyzed {len(uploaded_files)} resume(s)!")
+
+    st.divider()
+
+    # ── Recent searches ──
+    st.markdown('<p class="sidebar-label">🕘 Recent Questions</p>', unsafe_allow_html=True)
+
+    recent_queries = [
+        msg["content"]
+        for msg in st.session_state.messages
+        if msg["role"] == "user"
+    ]
+    recent_queries = list(reversed(recent_queries))
+
+    if recent_queries:
+        for i, query in enumerate(recent_queries[:8]):
+            display_text = query[:38] + "…" if len(query) > 38 else query
+            if st.button(f"💬 {display_text}", key=f"rec_{i}"):
+                st.session_state.clicked_query = query
+    else:
+        st.caption("No questions yet.")
+
+    st.divider()
+
+    # ── Reset ──
+    if st.button("🗑️  Clear Chat", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+# ----------------------------
+# QUICK-ACTION PROMPTS
+# ----------------------------
+
+QUICK_ACTIONS = [
+    ("🎯 ATS Score", "Give this resume an ATS compatibility score out of 100 and explain what to improve."),
+    ("💪 Key Skills", "List all the technical and soft skills found in this resume."),
+    ("⚠️  Weaknesses", "What are the main weaknesses or gaps in this resume?"),
+    ("✍️  Summary", "Write a strong professional summary based on this resume."),
+    ("📈 Improvements", "Give 5 specific, actionable suggestions to strengthen this resume."),
+    ("🏢 Job Fit", "What job roles is this candidate best suited for based on their resume?"),
+]
+
+if st.session_state.vectorstore:
+    st.markdown("**Quick Analysis:**")
+    cols = st.columns(3)
+    for idx, (label, prompt) in enumerate(QUICK_ACTIONS):
+        with cols[idx % 3]:
+            if st.button(label, key=f"qa_{idx}", use_container_width=True):
+                st.session_state.clicked_query = prompt
+
+# ----------------------------
+# CHAT HISTORY
+# ----------------------------
+
+for msg in st.session_state.messages:
+    if msg["role"] == "user":
+        st.markdown(
+            f"<div class='user-bubble'>🧑 {msg['content']}</div>",
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            f"<div class='bot-bubble'>🤖 {msg['content']}</div>",
+            unsafe_allow_html=True
+        )
+
+# ----------------------------
+# RESUME ANALYSIS PROMPT TEMPLATE
+# ----------------------------
+
+SYSTEM_PROMPT = """You are ResumeIQ, an expert AI resume analyst and career coach with deep knowledge of:
+- ATS (Applicant Tracking Systems) and how they score resumes
+- Industry-specific hiring standards across tech, finance, marketing, healthcare, and more
+- Resume writing best practices, formatting, and keyword optimization
+- Career gap analysis and skill assessment
+- Job market trends
+
+RULES:
+1. Answer ONLY using the resume content provided in the context.
+2. Be specific — reference actual details from the resume (names, companies, skills, dates).
+3. If information is not in the resume, say so clearly.
+4. For scores, always explain the rating with concrete reasons.
+5. Format your answers clearly with bullet points or sections when helpful.
+6. Be constructive, professional, and actionable.
+
+Resume Context:
+{context}
+
+Candidate's Question:
+{question}
+
+Your Analysis:"""
+
+# ----------------------------
+# USER INPUT & RESPONSE
+# ----------------------------
+
+clicked = st.session_state.get("clicked_query")
+new_question = st.chat_input(
+    "Ask about skills, ATS score, improvements, job fit…",
+    key="resume_chat_input"
+)
+
+question = new_question or clicked
+st.session_state.clicked_query = None
+
+if question and question.strip():
+
+    # Prevent duplicate runs
+    if st.session_state.get("last_question") == question:
+        st.stop()
+    st.session_state.last_question = question
+
+    st.session_state.messages.append({"role": "user", "content": question})
+
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    with st.chat_message("assistant"):
+
+        if st.session_state.vectorstore is None:
+            answer = (
+                "⚠️  No resume loaded yet. Please upload a PDF resume using the "
+                "sidebar and click **⚡ Analyze Resume(s)** first."
+            )
+            st.markdown(answer)
+
+        else:
+            with st.spinner("Analyzing resume…"):
+
+                retriever = st.session_state.vectorstore.as_retriever(
+                    search_type="mmr",
+                    search_kwargs={"k": 8, "fetch_k": 25}
+                )
+
+                docs = retriever.invoke(question)
+
+                context = ""
+                pages_used = set()
+
+                for doc in docs:
+                    page = doc.metadata.get("page", "?")
+                    source = doc.metadata.get("source_file", "resume")
+                    pages_used.add(f"{source} – p.{page + 1 if isinstance(page, int) else page}")
+                    context += f"\n--- [{source} | Page {page}] ---\n{doc.page_content}\n"
+
+                prompt = SYSTEM_PROMPT.format(context=context, question=question)
+
+                llm = get_llm()
+                response = llm.invoke(prompt)
+                answer = response.content
+
+                if pages_used:
+                    answer += f"\n\n---\n*Sources: {', '.join(sorted(pages_used))}*"
+
+            st.markdown(answer)
+
+        st.session_state.messages.append({"role": "assistant", "content": answer})
