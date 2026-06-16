@@ -254,30 +254,44 @@ with st.sidebar:
         documents = []
         progress = st.progress(0)
 
+        # FIX 1: spinner and loop correctly indented inside the if-button block
         with st.spinner("Reading resume(s)..."):
             for i, uploaded_file in enumerate(uploaded_files):
+
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     tmp.write(uploaded_file.read())
                     pdf_path = tmp.name
 
                 loader = PyPDFLoader(pdf_path)
                 docs = loader.load()
-                # Tag each chunk with the filename
+
                 for doc in docs:
                     doc.metadata["source_file"] = uploaded_file.name
+
                 documents.extend(docs)
                 progress.progress((i + 1) / len(uploaded_files))
 
+        # FIX 2: splitter and chunks correctly outside the for-loop but inside if-button block
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=1500,
             chunk_overlap=200
         )
         chunks = splitter.split_documents(documents)
 
+        # FIX 3: second spinner correctly indented
         with st.spinner("Building knowledge base..."):
+            st.write("Documents:", len(documents))
+            st.write("Chunks:", len(chunks))
+
+            if len(chunks) == 0:
+                st.error("❌ No text could be extracted from the PDF.")
+                st.info("Try uploading a text-based PDF instead of a scanned/image PDF.")
+                st.stop()
+
             vectorstore = FAISS.from_documents(chunks, embeddings)
             vectorstore.save_local("resume_faiss_index")
 
+        # FIX 4: these were incorrectly double-indented before
         st.session_state.vectorstore = vectorstore
         st.session_state.resume_name = ", ".join(f.name for f in uploaded_files)
         st.session_state.messages = []   # fresh chat for new resume
