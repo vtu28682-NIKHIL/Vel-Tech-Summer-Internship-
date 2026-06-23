@@ -1,0 +1,582 @@
+//APP.PY
+"""
+app.py
+------
+Fake News Detection - Streamlit Web Application
+
+This app lets a user paste a news article (or headline) into a text box
+and get an instant prediction of whether it's likely REAL or FAKE news,
+using the Logistic Regression model and TF-IDF vectorizer trained by
+train.py and saved as model.pkl / vectorizer.pkl.
+
+Run this app with:
+    streamlit run app.py
+"""
+
+# ----------------------------------------------------------------------------
+# 1. IMPORTS
+# ----------------------------------------------------------------------------
+import os
+import re
+import string
+import pickle
+
+import streamlit as st
+import nltk
+from nltk.corpus import stopwords
+
+
+# ----------------------------------------------------------------------------
+# 2. CONFIGURATION
+# ----------------------------------------------------------------------------
+MODEL_PATH = "model.pkl"
+VECTORIZER_PATH = "vectorizer.pkl"
+
+
+# ----------------------------------------------------------------------------
+# 3. NLTK SETUP (cached so it only runs once per app session, not on every
+#    user interaction / rerun, which keeps the app feeling fast)
+# ----------------------------------------------------------------------------
+@st.cache_resource
+def setup_nltk():
+    """
+    Ensure required NLTK resources are downloaded, then return the
+    English stopwords set for use in text cleaning.
+    """
+    resources = {
+        "stopwords": "corpora/stopwords",
+        "punkt": "tokenizers/punkt",
+        "punkt_tab": "tokenizers/punkt_tab",
+    }
+    for resource_name, resource_path in resources.items():
+        try:
+            nltk.data.find(resource_path)
+        except LookupError:
+            nltk.download(resource_name, quiet=True)
+
+    return set(stopwords.words("english"))
+
+
+# ----------------------------------------------------------------------------
+# 4. TEXT PREPROCESSING (must exactly mirror the cleaning logic used in
+#    train.py, otherwise the model will see differently-formatted input
+#    at prediction time than it learned from during training)
+# ----------------------------------------------------------------------------
+def clean_text(text: str, stop_words: set) -> str:
+    """
+    Apply the same preprocessing steps used during training:
+    lowercase -> remove punctuation -> remove numbers -> tokenize -> remove stopwords.
+    """
+    if not isinstance(text, str):
+        return ""
+
+    text = text.lower()
+    text = text.translate(str.maketrans(string.punctuation, " " * len(string.punctuation)))
+    text = re.sub(r"\d+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    tokens = nltk.word_tokenize(text)
+    cleaned_tokens = [word for word in tokens if word not in stop_words and len(word) > 1]
+
+    return " ".join(cleaned_tokens)
+
+
+# ----------------------------------------------------------------------------
+# 5. LOAD MODEL AND VECTORIZER (cached so the pickle files are only read
+#    from disk once, not on every single button click)
+# ----------------------------------------------------------------------------
+@st.cache_resource
+def load_artifacts(model_path: str, vectorizer_path: str):
+    """
+    Load the trained Logistic Regression model and the fitted TF-IDF
+    vectorizer from their pickle files. Returns (model, vectorizer, error).
+    If something goes wrong, error will contain a user-friendly message
+    and model/vectorizer will be None.
+    """
+    if not os.path.exists(model_path) or not os.path.exists(vectorizer_path):
+        error_msg = (
+            "Model or vectorizer file not found.\n\n"
+            f"Expected files:\n- {model_path}\n- {vectorizer_path}\n\n"
+            "Please run 'python train.py' first to train the model and "
+            "generate these files."
+        )
+        return None, None, error_msg
+
+    try:
+        with open(model_path, "rb") as model_file:
+            model = pickle.load(model_file)
+        with open(vectorizer_path, "rb") as vec_file:
+            vectorizer = pickle.load(vec_file)
+        return model, vectorizer, None
+    except Exception as exc:
+        return None, None, f"Failed to load model/vectorizer: {exc}"
+
+
+# ----------------------------------------------------------------------------
+# 6. PREDICTION LOGIC
+# ----------------------------------------------------------------------------
+def predict_news(text: str, model, vectorizer, stop_words: set):
+    """
+    Clean the input text, vectorize it with the loaded TF-IDF vectorizer,
+    and return a (label, confidence) tuple where label is "FAKE" or "REAL"
+    and confidence is the model's probability for that predicted class.
+    """
+    cleaned = clean_text(text, stop_words)
+
+    if cleaned.strip() == "":
+        return None, None  # nothing meaningful left after cleaning
+
+    features = vectorizer.transform([cleaned])
+    prediction = model.predict(features)[0]
+
+    # predict_proba gives [P(class=0=REAL), P(class=1=FAKE)]
+    probabilities = model.predict_proba(features)[0]
+    confidence = probabilities[prediction]
+
+    label = "FAKE" if prediction == 1 else "REAL"
+    return label, confidence
+
+
+# ----------------------------------------------------------------------------
+# 7. STREAMLIT PAGE LAYOUT
+# ----------------------------------------------------------------------------
+def main():
+    st.set_page_config(
+        page_title="Fake News Detector",
+        page_icon="📰",
+        layout="centered",
+    )
+
+    st.title("📰 Fake News Detection")
+    st.write(
+        "Paste a news headline or article body below, and this app will "
+        "predict whether it's likely **REAL** or **FAKE** news using a "
+        "Logistic Regression model trained on TF-IDF features."
+    )
+
+    # ---- Load NLTK resources and model artifacts (cached) ----
+    stop_words = setup_nltk()
+    model, vectorizer, load_error = load_artifacts(MODEL_PATH, VECTORIZER_PATH)
+
+    if load_error:
+        st.error(load_error)
+        st.stop()  # halt the app here; nothing else can run without the model
+
+    # ---- Input area ----
+    user_text = st.text_area(
+        "Enter news text:",
+        height=220,
+        placeholder="Paste a news article or headline here...",
+    )
+
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        predict_clicked = st.button("🔍 Predict", type="primary", use_container_width=True)
+    with col2:
+        st.caption("Tip: longer text (a full paragraph) usually gives more reliable predictions than a single short headline.")
+
+    # ---- Handle prediction ----
+    if predict_clicked:
+        if not user_text or user_text.strip() == "":
+            st.warning("⚠️ Please enter some news text before clicking Predict.")
+        else:
+            try:
+                label, confidence = predict_news(user_text, model, vectorizer, stop_words)
+
+                if label is None:
+                    st.warning(
+                        "⚠️ After cleaning, no meaningful words were left to analyze. "
+                        "Please enter a longer or more descriptive piece of text."
+                    )
+                elif label == "FAKE":
+                    st.error(f"🚨 Prediction: **FAKE NEWS** (confidence: {confidence:.1%})")
+                else:
+                    st.success(f"✅ Prediction: **REAL NEWS** (confidence: {confidence:.1%})")
+
+                with st.expander("See cleaned text used for prediction"):
+                    st.write(clean_text(user_text, stop_words))
+
+            except Exception as exc:
+                st.error(f"An error occurred while making the prediction: {exc}")
+
+    # ---- Sidebar with extra info ----
+    with st.sidebar:
+        st.header("ℹ️ About")
+        st.write(
+            "This app uses:\n"
+            "- **TF-IDF** for text feature extraction\n"
+            "- **Logistic Regression** for classification\n\n"
+            "Model trained on the Kaggle *Fake and Real News Dataset*."
+        )
+        st.warning(
+            "This tool is for educational purposes only and should not be "
+            "used as the sole basis for verifying real-world news."
+        )
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+  //TRAIN.PY
+
+                      
+"""
+train.py
+--------
+Trains a Fake News Detection model using TF-IDF + Logistic Regression.
+
+This script reads Fake.csv and True.csv, cleans the text, converts it into
+TF-IDF features, trains a Logistic Regression classifier, prints evaluation
+metrics, and saves the trained model and vectorizer as model.pkl and
+vectorizer.pkl so they can be loaded later by app.py.
+
+Run with:
+    python train.py
+"""
+
+# ----------------------------------------------------------------------------
+# 1. IMPORTS
+# ----------------------------------------------------------------------------
+import re
+import string
+import pickle
+
+import pandas as pd
+
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    classification_report,
+)
+
+
+# ----------------------------------------------------------------------------
+# 2. NLTK SETUP
+# ----------------------------------------------------------------------------
+def download_nltk_resources():
+    """
+    Download the NLTK resources required for tokenization and stopword
+    removal. Only downloads if not already present on the system.
+    """
+    required_resources = {
+        "punkt": "tokenizers/punkt",
+        "punkt_tab": "tokenizers/punkt_tab",
+        "stopwords": "corpora/stopwords",
+    }
+    for name, path in required_resources.items():
+        try:
+            nltk.data.find(path)
+        except LookupError:
+            print(f"Downloading NLTK resource: {name} ...")
+            nltk.download(name, quiet=True)
+
+
+# ----------------------------------------------------------------------------
+# 3. TEXT PREPROCESSING
+# ----------------------------------------------------------------------------
+def clean_text(text, stop_words):
+    """
+    Clean and preprocess a single string of text:
+        1. Lowercase conversion
+        2. Remove punctuation
+        3. Remove numbers
+        4. Tokenize using nltk
+        5. Remove English stopwords
+
+    Returns the cleaned tokens re-joined into a single string, which is
+    the format TfidfVectorizer expects.
+    """
+    # Guard against missing/NaN values being passed in
+    if not isinstance(text, str):
+        return ""
+
+    # 1. Lowercase conversion
+    text = text.lower()
+
+    # 2. Remove punctuation
+    text = text.translate(str.maketrans("", "", string.punctuation))
+
+    # 3. Remove numbers
+    text = re.sub(r"\d+", "", text)
+
+    # Collapse extra whitespace left behind by the removals above
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # 4. Tokenize using nltk
+    tokens = word_tokenize(text)
+
+    # 5. Remove English stopwords (and any leftover empty/1-char tokens)
+    cleaned_tokens = [word for word in tokens if word not in stop_words and len(word) > 1]
+
+    return " ".join(cleaned_tokens)
+
+
+# ----------------------------------------------------------------------------
+# 4. DATA LOADING AND PREPARATION
+# ----------------------------------------------------------------------------
+def load_and_prepare_data():
+    """
+    Read Fake.csv and True.csv, label them, merge them into a single
+    DataFrame, and combine the 'title' and 'text' columns into one
+    input column for the model.
+    """
+    # Read the two CSV files using pandas
+    fake_df = pd.read_csv("Fake.csv")
+    true_df = pd.read_csv("True.csv")
+
+    # Add labels: Fake = 1, Real = 0
+    fake_df["label"] = 1
+    true_df["label"] = 0
+
+    # Merge both datasets into a single DataFrame
+    df = pd.concat([fake_df, true_df], ignore_index=True)
+
+    # Use the title and text columns together as input
+    # (fillna handles any missing title/text values so concatenation doesn't break)
+    df["content"] = df["title"].fillna("") + " " + df["text"].fillna("")
+
+    # Shuffle the merged dataset so fake/real rows are mixed together
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+
+    return df
+
+
+# ----------------------------------------------------------------------------
+# 5. MAIN PIPELINE
+# ----------------------------------------------------------------------------
+def main():
+    # Step 1: Make sure required NLTK resources are available
+    download_nltk_resources()
+    stop_words = set(stopwords.words("english"))
+
+    # Step 2: Load and prepare the dataset (read, label, merge, combine columns)
+    print("Loading and preparing data...")
+    df = load_and_prepare_data()
+    print(f"Total articles loaded: {len(df)} "
+          f"(Fake: {(df['label'] == 1).sum()}, Real: {(df['label'] == 0).sum()})")
+
+    # Step 3: Apply NLP preprocessing to every article
+    print("Cleaning text (lowercase, remove punctuation/numbers, tokenize, remove stopwords)...")
+    df["clean_text"] = df["content"].apply(lambda x: clean_text(x, stop_words))
+
+    # Step 4: Feature extraction using TF-IDF
+    print("Vectorizing text using TF-IDF...")
+    vectorizer = TfidfVectorizer(max_features=5000)
+    X = vectorizer.fit_transform(df["clean_text"])
+    y = df["label"]
+
+    # Step 5: Split data into train and test sets
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    # Step 6: Train a Logistic Regression model
+    print("Training Logistic Regression model...")
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X_train, y_train)
+
+    # Step 7: Evaluate the model on the test set
+    y_pred = model.predict(X_test)
+
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred, zero_division=0)
+    recall = recall_score(y_test, y_pred, zero_division=0)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
+
+    print("\n" + "=" * 50)
+    print("MODEL EVALUATION RESULTS")
+    print("=" * 50)
+    print(f"Accuracy : {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall   : {recall:.4f}")
+    print(f"F1 Score : {f1:.4f}")
+    print("\nClassification Report:")
+    print(classification_report(y_test, y_pred, target_names=["REAL", "FAKE"], zero_division=0))
+    print("=" * 50)
+
+    # Step 8: Save the trained model using pickle
+    with open("model.pkl", "wb") as model_file:
+        pickle.dump(model, model_file)
+
+    # Step 9: Save the fitted TF-IDF vectorizer using pickle
+    with open("vectorizer.pkl", "wb") as vectorizer_file:
+        pickle.dump(vectorizer, vectorizer_file)
+
+    print("\nSaved model.pkl and vectorizer.pkl successfully.")
+
+
+# ----------------------------------------------------------------------------
+# 6. ENTRY POINT
+# ----------------------------------------------------------------------------
+if __name__ == "__main__":
+    main()    
+
+// README.md
+
+# 📰 Fake News Detection
+
+A complete, beginner-friendly machine learning project that classifies news articles as **FAKE** or **REAL** using classic NLP techniques (TF-IDF) and a Logistic Regression model, with an interactive Streamlit web app for live predictions.
+
+---
+
+## 📁 Project Structure
+
+```
+Fake-News-Detection/
+│
+├── dataset/
+│   ├── Fake.csv          # Fake news articles (from Kaggle)
+│   └── True.csv          # Real news articles (from Kaggle)
+│
+├── train.py              # Preprocesses data, trains model, evaluates, saves artifacts
+├── app.py                # Streamlit web app for live predictions
+├── model.pkl             # Saved trained Logistic Regression model (generated)
+├── vectorizer.pkl        # Saved fitted TF-IDF vectorizer (generated)
+├── requirements.txt      # Python dependencies
+└── README.md             # This file
+```
+
+> **Note:** `model.pkl` and `vectorizer.pkl` are generated automatically when you run `train.py`. They are not meant to be edited by hand.
+
+---
+
+## 📦 1. Dataset Setup
+
+This project uses the **Fake and Real News Dataset** from Kaggle:
+
+🔗 https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset
+
+**Steps:**
+1. Create a free Kaggle account if you don't have one.
+2. Download the dataset (it contains `Fake.csv` and `True.csv`).
+3. Unzip it and place both CSV files inside the `dataset/` folder, exactly as shown in the project structure above.
+
+> A couple of tiny **sample** `Fake.csv` / `True.csv` files are included in this repo just so you can test that the code runs end-to-end. **Replace them with the full Kaggle files** for a real, accurate model — the full dataset has ~44,000 articles, while the included samples only have 24 (just for wiring-testing, not real accuracy).
+
+---
+
+## ⚙️ 2. Installation
+
+It's best practice to use a virtual environment.
+
+```bash
+# 1. Navigate into the project folder
+cd Fake-News-Detection
+
+# 2. (Recommended) Create and activate a virtual environment
+python -m venv venv
+
+# On Windows:
+venv\Scripts\activate
+
+# On macOS/Linux:
+source venv/bin/activate
+
+# 3. Install all required dependencies
+pip install -r requirements.txt
+```
+
+The first time you run the project, it will automatically download the required NLTK data (`stopwords`, `punkt`, `punkt_tab`) — you need an internet connection for this one-time step.
+
+---
+
+## 🚀 3. Train the Model
+
+Run the training script. This will:
+- Load and clean the dataset
+- Convert text to TF-IDF features
+- Train a Logistic Regression classifier
+- Print accuracy, precision, recall, F1-score, and a confusion matrix
+- Save `model.pkl` and `vectorizer.pkl` to the project root
+
+```bash
+python train.py
+```
+
+**Example output:**
+```
+==================================================
+MODEL EVALUATION RESULTS
+==================================================
+Accuracy : 0.9870
+Precision: 0.9850
+Recall   : 0.9890
+F1 Score : 0.9870
+
+Confusion Matrix (rows=actual, cols=predicted) [REAL, FAKE]:
+[[4250   60]
+ [  45 4290]]
+...
+[SUCCESS] Training pipeline completed successfully!
+```
+
+(Exact numbers will vary depending on the dataset version and split.)
+
+---
+
+## 🌐 4. Run the Streamlit Web App
+
+Once `model.pkl` and `vectorizer.pkl` exist (after running `train.py`), launch the web app:
+
+```bash
+streamlit run app.py
+```
+
+This will open a browser window (usually at `http://localhost:8501`) where you can:
+1. Paste any news headline or article text into the text box.
+2. Click **🔍 Predict**.
+3. See whether the model classifies it as **FAKE** or **REAL**, along with a confidence score.
+
+---
+
+## 🧠 How It Works
+
+1. **Preprocessing** (`clean_text` function, shared logic in both `train.py` and `app.py`):
+   - Lowercases all text
+   - Removes punctuation
+   - Removes digits/numbers
+   - Tokenizes text into words
+   - Removes common English stopwords (e.g. "the", "is", "and")
+
+2. **Feature Extraction**: `TfidfVectorizer` converts cleaned text into numeric vectors, weighting words by how distinctive they are across the corpus (with unigrams + bigrams, capped at 5000 features).
+
+3. **Model**: A `LogisticRegression` classifier is trained on the TF-IDF vectors to learn the boundary between fake and real news.
+
+4. **Evaluation**: The model is tested on a held-out 20% test split using accuracy, precision, recall, F1-score, and a confusion matrix.
+
+5. **Persistence**: The trained model and the fitted vectorizer are saved with `pickle` so the Streamlit app can load them instantly without retraining.
+
+---
+
+## 🛠️ Troubleshooting
+
+| Problem | Solution |
+|---|---|
+| `FileNotFoundError: Dataset files not found` | Make sure `Fake.csv` and `True.csv` are inside the `dataset/` folder. |
+| `Model or vectorizer file not found` in the app | Run `python train.py` first to generate `model.pkl` and `vectorizer.pkl`. |
+| NLTK download fails / `LookupError` | Run manually: `python -m nltk.downloader stopwords punkt punkt_tab` |
+| Low accuracy | Make sure you replaced the small sample CSVs with the **full** Kaggle dataset. |
+
+---
+
+## ⚠️ Disclaimer
+
+This project is for **educational purposes only**. It is a simplified classroom-style model and should **not** be relied upon as a real-world fact-checking tool. Always verify news through trusted, reputable sources.
+
+---
+
+## 📜 License
+
+Free to use for learning and educational purposes.
+ 
